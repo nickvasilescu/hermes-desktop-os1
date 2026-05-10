@@ -175,6 +175,7 @@ struct RootView: View {
             }
         }
         .buttonStyle(.plain)
+        .help(appState.realtimeVoiceStatus)
     }
 
     private var voiceStatusLabel: String {
