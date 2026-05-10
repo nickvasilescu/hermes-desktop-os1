@@ -87,6 +87,11 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
         guard startedLaunchToken != launchToken else { return }
         startedLaunchToken = launchToken
 
+        guard !sshArguments.isEmpty else {
+            onProcessExit?(-1)
+            return
+        }
+
         // Preserve the minimum terminal environment and auth socket so SSH can
         // authenticate with agent-backed keys the same way as non-interactive checks.
         let environment = terminalEnvironment()
@@ -102,6 +107,7 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
 
     private func terminalEnvironment() -> [String] {
         var environment = [String: String]()
+        let validEnvKey = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
 
         for entry in Terminal.getEnvironmentVariables(termName: "xterm-256color") {
             let parts = entry.split(separator: "=", maxSplits: 1)
@@ -110,6 +116,12 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
             }
             let key = String(parts[0])
             let value = String(parts[1])
+
+            guard !key.isEmpty,
+                  key.unicodeScalars.allSatisfy(validEnvKey.contains) else {
+                continue
+            }
+
             environment[key] = value
         }
 

@@ -445,6 +445,17 @@ final class AppState: ObservableObject {
             selectedSection = .connections
             return
         }
+        if section == .terminal,
+           let activeConnection,
+           activeConnection.validationError != nil {
+            setStatusMessage(L10n.string("Please fix this connection before opening a terminal tab."))
+            return
+        }
+        if section == .terminal, activeConnection == nil {
+            selectedSection = .connections
+            setStatusMessage(L10n.string("Select a connection before opening Terminal."))
+            return
+        }
 
         if hasUnsavedFileChanges && selectedSection == .files {
             pendingSectionSelection = section
@@ -475,7 +486,10 @@ final class AppState: ObservableObject {
     }
 
     func openNewTerminalTabFromCommand() {
-        guard let profile = activeConnection else { return }
+        guard let profile = activeConnection, profile.validationError == nil else {
+            setStatusMessage(L10n.string("Please fix this connection before opening a terminal tab."))
+            return
+        }
         terminalWorkspace.addTab(for: profile.updated())
         selectedSection = .terminal
         handleSectionEntry(.terminal)

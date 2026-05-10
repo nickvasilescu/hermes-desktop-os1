@@ -1000,3 +1000,5 @@
 "Realtime Voice" = "Realtime Voice";
 "Toggle Voice Mode" = "Toggle Voice Mode";
 "Voice" = "Voice";
+"Please fix this connection before opening a terminal tab." = "Please fix this connection before opening a terminal tab.";
+"Select a connection before opening Terminal." = "Select a connection before opening Terminal.";
