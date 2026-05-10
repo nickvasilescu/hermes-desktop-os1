@@ -97,7 +97,8 @@ the boot animation finishes. The bottom-left **Voice** row toggles the
 live voice connection on or off; there is no separate voice control
 panel.
 
-The browser surface in the app sends raw SDP to `POST /session`. The
+The browser surface in the app sends raw SDP to `POST /session` on a
+loopback-only endpoint protected by a per-process random token. The
 Swift endpoint keeps `OPENAI_API_KEY` server-side, forwards the SDP to
 `https://api.openai.com/v1/realtime/calls`, and uses multipart
 `FormData` fields named `sdp` and `session`.
@@ -138,23 +139,26 @@ model tool calls back to `tools/call`; Orgo credentials stay in the
 Swift app and are never sent to the browser or model. By default the
 Realtime voice bridge exposes `core,screen,files`, disables file upload,
 uses the saved Orgo API key in OS1 or `ORGO_API_KEY` if no key is saved,
-and passes the active Orgo connection's computer ID as
-`ORGO_DEFAULT_COMPUTER_ID`.
+passes the active Orgo connection's computer ID as
+`ORGO_DEFAULT_COMPUTER_ID`, and defaults the local MCP process to
+read-only mode.
 
-Voice mode runs `npx -y @orgo-ai/mcp` by default. You can override the
+Voice mode runs `npx -y @orgo-ai/mcp@3.0.0` by default. You can override the
 bridge with:
 
 ```sh
 OS1_ORGO_MCP_JS_PATH="/absolute/path/to/dist/index.js"
-OS1_ORGO_MCP_PACKAGE="@orgo-ai/mcp"
+OS1_ORGO_MCP_PACKAGE="@orgo-ai/mcp@3.0.0"
 OS1_REALTIME_ORGO_TOOLSETS="core,screen,files"
 OS1_REALTIME_ORGO_DISABLED_TOOLS="orgo_upload_file"
 OS1_REALTIME_ORGO_READ_ONLY="true"
 ```
 
-`shell` and `admin` are opt-in through `OS1_REALTIME_ORGO_TOOLSETS`.
-Only enable them for agents and computers you are comfortable letting a
-voice model operate.
+`OS1_ORGO_MCP_PACKAGE` must include an explicit npm version. `shell` and
+`admin` are opt-in through `OS1_REALTIME_ORGO_TOOLSETS`, and write-capable
+tool behavior requires explicitly setting `OS1_REALTIME_ORGO_READ_ONLY=false`.
+Only enable them for agents and computers you are comfortable letting a voice
+model operate.
 
 Live integration tests (skipped by default) hit a real cloud computer:
 

@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Security
 
 final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
     @Published private(set) var endpointURL: URL?
@@ -9,6 +10,7 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.elementsoftware.os1.realtime-voice")
     private var listener: NWListener?
     private var apiKey: String?
+    private let accessToken = RealtimeVoiceSessionServer.makeAccessToken()
     private let openAIAPIKeyProvider: @Sendable () -> String?
     private let orgoMCPBridge: RealtimeOrgoMCPBridge
 
@@ -81,9 +83,10 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
         case .ready:
             guard let port = listener?.port else { return }
             DispatchQueue.main.async { [weak self] in
-                self?.endpointURL = URL(string: "http://127.0.0.1:\(port.rawValue)/")
-                self?.statusText = "Voice endpoint ready"
-                self?.lastError = nil
+                guard let self else { return }
+                self.endpointURL = URL(string: "http://127.0.0.1:\(port.rawValue)/?token=\(self.accessToken)")
+                self.statusText = "Voice endpoint ready"
+                self.lastError = nil
             }
         case .failed(let error):
             DispatchQueue.main.async { [weak self] in
@@ -145,6 +148,11 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
     }
 
     private func route(_ request: HTTPRequest, on connection: NWConnection) {
+        guard request.hasAccessToken(accessToken) else {
+            send(.plain(status: 403, body: "Forbidden"), on: connection)
+            return
+        }
+
         switch (request.method, request.path) {
         case ("GET", "/"), ("GET", "/index.html"):
             send(.html(status: 200, body: Self.voiceHTML), on: connection)
@@ -273,6 +281,16 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
         } catch {
             return .plain(status: 500, body: "Failed to encode JSON response: \(error.localizedDescription)")
         }
+    }
+
+    private static func makeAccessToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        if status == errSecSuccess {
+            return bytes.map { String(format: "%02x", $0) }.joined()
+        }
+        return UUID().uuidString.replacingOccurrences(of: "-", with: "") +
+            UUID().uuidString.replacingOccurrences(of: "-", with: "")
     }
 
     private static let sessionConfig: String = {
@@ -442,6 +460,7 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
       </main>
 
       <script>
+        const accessToken = new URLSearchParams(window.location.search).get("token") || "";
         const statusEl = document.getElementById("status");
         const orb = document.getElementById("orb");
         const orbLabel = document.getElementById("orb-label");
@@ -476,6 +495,10 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
           dc.send(JSON.stringify(event));
         }
 
+        function localEndpoint(path) {
+          return `${path}?token=${encodeURIComponent(accessToken)}`;
+        }
+
         function calendarTool() {
           return {
             type: "function",
@@ -500,7 +523,7 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
         }
 
         async function registerTools() {
-          const toolPayload = await fetch("/tools").then((response) => response.json());
+          const toolPayload = await fetch(localEndpoint("/tools")).then((response) => response.json());
           const orgoTools = Array.isArray(toolPayload.tools) ? toolPayload.tools : [];
           sendEvent({
             type: "session.update",
@@ -551,7 +574,7 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
         }
 
         async function callOrgoTool(name, args) {
-          const response = await fetch("/tool", {
+          const response = await fetch(localEndpoint("/tool"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name, arguments: args })
@@ -661,7 +684,7 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
 
-          const sdpResponse = await fetch("/session", {
+          const sdpResponse = await fetch(localEndpoint("/session"), {
             method: "POST",
             body: offer.sdp,
             headers: { "Content-Type": "application/sdp" }
@@ -699,8 +722,9 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
           try {
             await startVoice();
           } catch (error) {
-            log(`start failed: ${error.message}`);
-            stopVoice("error");
+            const message = error?.message || String(error);
+            log(`start failed: ${message}`);
+            stopVoice(`error: ${message}`);
           }
         }
 
@@ -737,6 +761,7 @@ final class RealtimeVoiceSessionServer: ObservableObject, @unchecked Sendable {
 private struct HTTPRequest {
     let method: String
     let path: String
+    let queryItems: [String: String]
     let headers: [String: String]
     let body: Data
 
@@ -764,10 +789,27 @@ private struct HTTPRequest {
         let bodyStart = headerRange.upperBound
         guard data.count >= bodyStart + contentLength else { return nil }
 
+        let target = requestParts[1]
+        let components = URLComponents(string: target)
         method = requestParts[0].uppercased()
-        path = String(requestParts[1].split(separator: "?", maxSplits: 1).first ?? "/")
+        if let componentPath = components?.path, !componentPath.isEmpty {
+            path = componentPath
+        } else {
+            path = String(target.split(separator: "?", maxSplits: 1).first ?? "/")
+        }
+        var parsedQueryItems: [String: String] = [:]
+        for item in components?.queryItems ?? [] {
+            if let value = item.value {
+                parsedQueryItems[item.name] = value
+            }
+        }
+        queryItems = parsedQueryItems
         self.headers = headers
         body = Data(data[bodyStart..<(bodyStart + contentLength)])
+    }
+
+    func hasAccessToken(_ expected: String) -> Bool {
+        queryItems["token"] == expected || headers["x-os1-voice-token"] == expected
     }
 }
 
@@ -782,6 +824,8 @@ private struct HTTPResponse {
             "OK"
         case 400:
             "Bad Request"
+        case 403:
+            "Forbidden"
         case 404:
             "Not Found"
         case 413:

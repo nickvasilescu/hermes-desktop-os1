@@ -57,5 +57,7 @@ struct RealtimeCallsMultipartRequestTests {
     func realtimeOrgoMCPUsesBoundedPublicDefaults() {
         #expect(RealtimeOrgoMCPBridge.defaultToolsets == "core,screen,files")
         #expect(RealtimeOrgoMCPBridge.defaultDisabledTools == "orgo_upload_file")
+        #expect(RealtimeOrgoMCPBridge.defaultReadOnly == "true")
+        #expect(RealtimeOrgoMCPBridge.defaultPackage == "@orgo-ai/mcp@3.0.0")
     }
 }

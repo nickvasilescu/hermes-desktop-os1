@@ -38,6 +38,8 @@ struct RealtimeOrgoMCPCallResult: Encodable {
 final class RealtimeOrgoMCPBridge: @unchecked Sendable {
     static let defaultToolsets = "core,screen,files"
     static let defaultDisabledTools = "orgo_upload_file"
+    static let defaultReadOnly = "true"
+    static let defaultPackage = "@orgo-ai/mcp@3.0.0"
 
     private let apiKeyProvider: @Sendable () -> String?
     private let defaultComputerIDProvider: @Sendable () -> String?
@@ -120,9 +122,7 @@ final class RealtimeOrgoMCPBridge: @unchecked Sendable {
         // configuration.
         environment["ORGO_TOOLSETS"] = ProcessInfo.processInfo.environment["OS1_REALTIME_ORGO_TOOLSETS"] ?? Self.defaultToolsets
         environment["ORGO_DISABLED_TOOLS"] = ProcessInfo.processInfo.environment["OS1_REALTIME_ORGO_DISABLED_TOOLS"] ?? Self.defaultDisabledTools
-        if let readOnly = ProcessInfo.processInfo.environment["OS1_REALTIME_ORGO_READ_ONLY"] {
-            environment["ORGO_READ_ONLY"] = readOnly
-        }
+        environment["ORGO_READ_ONLY"] = ProcessInfo.processInfo.environment["OS1_REALTIME_ORGO_READ_ONLY"] ?? Self.defaultReadOnly
 
         return try RealtimeMCPStdioSession(command: command.path, arguments: command.arguments, environment: environment)
     }
@@ -146,20 +146,69 @@ final class RealtimeOrgoMCPBridge: @unchecked Sendable {
     private static func resolveCommand() -> MCPCommand? {
         let env = ProcessInfo.processInfo.environment
         if let configuredPath = env["OS1_ORGO_MCP_JS_PATH"], FileManager.default.fileExists(atPath: configuredPath),
-           let node = firstExecutable(["/usr/local/bin/node", "/opt/homebrew/bin/node", "/usr/bin/node"]) {
+           let node = firstExecutable(named: "node", fallbackPaths: [
+               "/usr/local/bin/node",
+               "/opt/homebrew/bin/node",
+               "/run/current-system/sw/bin/node",
+               "/usr/bin/node",
+           ]) {
             return MCPCommand(path: node, arguments: [configuredPath])
         }
 
-        if let npx = firstExecutable(["/usr/local/bin/npx", "/opt/homebrew/bin/npx", "/usr/bin/npx"]) {
-            let package = env["OS1_ORGO_MCP_PACKAGE"] ?? "@orgo-ai/mcp"
+        if let npx = firstExecutable(named: "npx", fallbackPaths: [
+            "/usr/local/bin/npx",
+            "/opt/homebrew/bin/npx",
+            "/run/current-system/sw/bin/npx",
+            "/usr/bin/npx",
+        ]) {
+            let package = env["OS1_ORGO_MCP_PACKAGE"] ?? Self.defaultPackage
+            guard isPinnedNPMPackage(package) else { return nil }
             return MCPCommand(path: npx, arguments: ["-y", package])
         }
 
         return nil
     }
 
-    private static func firstExecutable(_ paths: [String]) -> String? {
-        paths.first { FileManager.default.isExecutableFile(atPath: $0) }
+    private static func isPinnedNPMPackage(_ package: String) -> Bool {
+        let trimmed = package.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains(where: { $0.isWhitespace }) else {
+            return false
+        }
+
+        if trimmed.hasPrefix("@") {
+            guard let slash = trimmed.firstIndex(of: "/") else { return false }
+            let afterPackageName = trimmed.index(after: slash)
+            guard let versionSeparator = trimmed[afterPackageName...].lastIndex(of: "@") else {
+                return false
+            }
+            let versionStart = trimmed.index(after: versionSeparator)
+            return versionStart < trimmed.endIndex && trimmed[versionStart].isNumber
+        }
+
+        guard let versionSeparator = trimmed.lastIndex(of: "@") else {
+            return false
+        }
+        let versionStart = trimmed.index(after: versionSeparator)
+        return versionStart < trimmed.endIndex && trimmed[versionStart].isNumber
+    }
+
+    private static func firstExecutable(named name: String, fallbackPaths: [String]) -> String? {
+        var paths = fallbackPaths
+        let pathEntries = ProcessInfo.processInfo.environment["PATH"]?
+            .split(separator: ":")
+            .map(String.init) ?? []
+
+        for entry in pathEntries {
+            paths.append(URL(fileURLWithPath: entry, isDirectory: true).appendingPathComponent(name).path)
+        }
+
+        var seen = Set<String>()
+        for path in paths where seen.insert(path).inserted {
+            if FileManager.default.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+        return nil
     }
 
     private static func baseEnvironment() -> [String: String] {

@@ -1,7 +1,10 @@
 import AppKit
 import Combine
 import Foundation
+import OSLog
 import SwiftUI
+
+private let appStateLogger = Logger(subsystem: "com.elementsoftware.os1", category: "AppState")
 
 /// Lock-protected snapshot of the active connection's UUID. Mirrors
 /// `AppState.activeConnectionID` so `@Sendable` closures (HTTP clients,
@@ -488,6 +491,7 @@ final class AppState: ObservableObject {
     }
 
     func updateRealtimeVoiceStatus(_ status: String) {
+        appStateLogger.info("Realtime voice status: \(status, privacy: .public)")
         realtimeVoiceStatus = status
     }
 
