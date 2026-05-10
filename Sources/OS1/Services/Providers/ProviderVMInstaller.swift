@@ -168,8 +168,16 @@ extension ProviderVMInstaller {
                 import yaml  # noqa: F401
                 return True
             except Exception as exc:
-                errors.append(f"PyYAML not available and pip install failed: {exc}")
-                return False
+                # Tests and locked-down hosts may run with HOME pointed at
+                # an empty sandbox, which hides user-site PyYAML and can make
+                # pip unavailable. We can still write the small config shape
+                # OS1 owns without PyYAML; existing complex config files still
+                # need PyYAML to be preserved exactly.
+                return True
+
+        def dump_config_fallback(data):
+            # JSON is valid YAML 1.2 and keeps the fallback dependency-free.
+            return json.dumps(data, indent=2) + "\n"
 
         def read_env_file():
             entries = []
@@ -233,24 +241,32 @@ extension ProviderVMInstaller {
             return False
 
         def load_config():
-            import yaml as _yaml
             if not os.path.exists(config_path):
                 return {}
             try:
+                import yaml as _yaml
                 with open(config_path, "r") as fh:
                     loaded = _yaml.safe_load(fh) or {}
                     return loaded if isinstance(loaded, dict) else {}
             except Exception as exc:
-                errors.append(f"Couldn't read existing config.yaml: {exc}")
-                return {}
+                try:
+                    with open(config_path, "r") as fh:
+                        loaded = json.load(fh) or {}
+                        return loaded if isinstance(loaded, dict) else {}
+                except Exception:
+                    errors.append(f"Couldn't read existing config.yaml: {exc}")
+                    return {}
 
         def write_config(data):
-            import yaml as _yaml
             try:
                 os.makedirs(hermes_dir, exist_ok=True)
                 tmp_path = config_path + ".tmp"
                 with open(tmp_path, "w") as fh:
-                    _yaml.safe_dump(data, fh, sort_keys=False, default_flow_style=False)
+                    try:
+                        import yaml as _yaml
+                        _yaml.safe_dump(data, fh, sort_keys=False, default_flow_style=False)
+                    except Exception:
+                        fh.write(dump_config_fallback(data))
                 os.replace(tmp_path, config_path)
                 try:
                     os.chmod(config_path, 0o600)

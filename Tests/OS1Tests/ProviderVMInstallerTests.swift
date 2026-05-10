@@ -186,9 +186,15 @@ struct ProviderVMInstallerTests {
         return InstallerOutcome(config: parsed, authJSON: auth, envContent: envContent)
     }
 
-    /// Round-trips YAML → Python → JSON so we don't take a Swift YAML
-    /// dep just for tests. PyYAML is required by the installer anyway.
+    /// Round-trips config.yaml into a dictionary without taking a Swift
+    /// YAML dependency. The installer may write JSON as its no-PyYAML
+    /// fallback because JSON is valid YAML.
     private func parseYAML(_ text: String) throws -> [String: Any] {
+        if let data = text.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return parsed
+        }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [
