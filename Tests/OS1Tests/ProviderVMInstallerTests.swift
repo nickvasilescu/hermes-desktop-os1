@@ -129,8 +129,147 @@ struct ProviderVMInstallerTests {
         #expect(outcome.authJSON["active_provider"] as? String == "openai")
     }
 
+    @Test
+    func fallbackParsesSimpleConfigWithoutPyYAML() throws {
+        let openai = try #require(ProviderCatalog.entry(for: "openai"))
+        let initialConfig = """
+        model:
+          provider: anthropic
+          default: claude-opus-4.6
+          temperature: 0.2
+          enabled: true
+          tags:
+            - fast
+            - stable
+        custom_providers:
+          - name: existing
+            base_url: https://example.test/v1
+            key_env: EXISTING_API_KEY
+        metadata:
+          retries: 3
+          nested:
+            enabled: false
+        """
+
+        let outcome = try runInstallerScript(
+            provider: openai,
+            action: .install(apiKey: "sk-test-openai", activateModel: "gpt-5.2-codex"),
+            initialConfig: initialConfig,
+            blockPyYAML: true
+        )
+
+        #expect(outcome.result["success"] as? Bool == true)
+        #expect((outcome.result["errors"] as? [String])?.isEmpty == true)
+        #expect(outcome.configText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{"))
+
+        let model = try #require(outcome.config["model"] as? [String: Any])
+        #expect(model["provider"] as? String == "openai")
+        #expect(model["default"] as? String == "gpt-5.2-codex")
+        #expect(model["base_url"] as? String == "https://api.openai.com/v1")
+        #expect((model["temperature"] as? NSNumber)?.doubleValue == 0.2)
+        #expect((model["enabled"] as? NSNumber)?.boolValue == true)
+        #expect(model["tags"] as? [String] == ["fast", "stable"])
+
+        let providers = try #require(outcome.config["custom_providers"] as? [[String: Any]])
+        #expect(providers.contains { ($0["name"] as? String) == "existing" })
+        #expect(providers.contains { ($0["name"] as? String) == "openai" })
+
+        let metadata = try #require(outcome.config["metadata"] as? [String: Any])
+        #expect((metadata["retries"] as? NSNumber)?.intValue == 3)
+        let nested = try #require(metadata["nested"] as? [String: Any])
+        #expect((nested["enabled"] as? NSNumber)?.boolValue == false)
+    }
+
+    @Test
+    func pyYAMLPathStillHandlesRicherYAML() throws {
+        let openai = try #require(ProviderCatalog.entry(for: "openai"))
+        let initialConfig = """
+        custom_providers:
+          - &existing
+            name: existing
+            base_url: https://example.test/v1
+            key_env: EXISTING_API_KEY
+        provider_alias: *existing
+        """
+
+        let outcome = try runInstallerScript(
+            provider: openai,
+            action: .install(apiKey: "sk-test-openai", activateModel: nil),
+            initialConfig: initialConfig
+        )
+
+        #expect(outcome.result["success"] as? Bool == true)
+        #expect((outcome.result["errors"] as? [String])?.isEmpty == true)
+
+        let providers = try #require(outcome.config["custom_providers"] as? [[String: Any]])
+        #expect(providers.contains { ($0["name"] as? String) == "existing" })
+        #expect(providers.contains { ($0["name"] as? String) == "openai" })
+        let alias = try #require(outcome.config["provider_alias"] as? [String: Any])
+        #expect(alias["name"] as? String == "existing")
+    }
+
+    @Test
+    func statusReadsSimpleConfigWithoutPyYAML() throws {
+        let openai = try #require(ProviderCatalog.entry(for: "openai"))
+        let initialConfig = """
+        model:
+          provider: openai
+          default: gpt-5.2-codex
+        custom_providers:
+          - name: openai
+            base_url: https://api.openai.com/v1
+            key_env: OPENAI_API_KEY
+        """
+
+        let outcome = try runInstallerScript(
+            provider: openai,
+            action: .status,
+            initialConfig: initialConfig,
+            initialEnv: #"OPENAI_API_KEY="sk-test-openai""# + "\n",
+            blockPyYAML: true
+        )
+
+        #expect(outcome.result["success"] as? Bool == true)
+        #expect((outcome.result["errors"] as? [String])?.isEmpty == true)
+        #expect(outcome.result["active_model"] as? String == "gpt-5.2-codex")
+        let steps = try #require(outcome.result["steps_done"] as? [String])
+        #expect(steps.contains("env_present"))
+        #expect(steps.contains("custom_provider_present"))
+        #expect(steps.contains("model_provider_active"))
+    }
+
+    @Test
+    func malformedConfigWithoutPyYAMLFailsClearlyAfterPartialInstall() throws {
+        let openai = try #require(ProviderCatalog.entry(for: "openai"))
+        let malformedConfig = """
+        model:
+          provider: anthropic
+            default: claude-opus-4.6
+        """
+
+        let outcome = try runInstallerScript(
+            provider: openai,
+            action: .install(apiKey: "sk-test-openai", activateModel: "gpt-5.2-codex"),
+            initialConfig: malformedConfig,
+            blockPyYAML: true,
+            expectSuccess: false
+        )
+
+        #expect(outcome.result["success"] as? Bool == false)
+        let errors = try #require(outcome.result["errors"] as? [String])
+        #expect(errors.contains { $0.contains("Couldn't parse existing config.yaml without PyYAML") })
+        let steps = try #require(outcome.result["steps_done"] as? [String])
+        #expect(steps.contains("env_written"))
+        #expect(!steps.contains("custom_provider_written"))
+        #expect(!steps.contains("activated"))
+        #expect(outcome.envContent.contains("OPENAI_API_KEY"))
+        #expect(outcome.configText == malformedConfig)
+    }
+
     private struct InstallerOutcome {
+        let result: [String: Any]
         let config: [String: Any]
+        let configText: String
         let authJSON: [String: Any]
         let envContent: String
     }
@@ -139,41 +278,83 @@ struct ProviderVMInstallerTests {
     /// land in `<tmp>/.hermes/`. Returns the parsed config / auth files.
     private func runInstallerScript(
         provider: ProviderCatalogEntry,
-        action: ProviderVMInstallAction
+        action: ProviderVMInstallAction,
+        initialConfig: String? = nil,
+        initialEnv: String? = nil,
+        blockPyYAML: Bool = false,
+        expectSuccess: Bool = true
     ) throws -> InstallerOutcome {
         let script = ProviderVMInstaller.makeScript(provider: provider, action: action)
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("os1-installer-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
+        let hermesDir = tmp.appendingPathComponent(".hermes")
+        try FileManager.default.createDirectory(at: hermesDir, withIntermediateDirectories: true)
+        if let initialConfig {
+            try Data(initialConfig.utf8).write(to: hermesDir.appendingPathComponent("config.yaml"))
+        }
+        if let initialEnv {
+            try Data(initialEnv.utf8).write(to: hermesDir.appendingPathComponent(".env"))
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["python3", "-c", script]
+        let wrapper = blockPyYAML ? """
+        import builtins
+        import subprocess
+        import sys
+
+        real_import = builtins.__import__
+        def blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "yaml" or name.startswith("yaml."):
+                raise ImportError("blocked yaml for test")
+            return real_import(name, globals, locals, fromlist, level)
+
+        def blocked_run(*args, **kwargs):
+            raise RuntimeError("pip disabled for test")
+
+        builtins.__import__ = blocked_import
+        subprocess.run = blocked_run
+        exec(compile(sys.stdin.read(), "<installer>", "exec"))
+        """ : """
+        import sys
+        exec(compile(sys.stdin.read(), "<installer>", "exec"))
+        """
+        process.arguments = ["python3", "-c", wrapper]
         // HOME drives os.path.expanduser("~") inside the script; sandbox
         // the writes here so we don't touch the developer's real .hermes.
         process.environment = ["HOME": tmp.path, "PATH": ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"]
 
+        let stdin = Pipe()
         let stdout = Pipe()
         let stderr = Pipe()
+        process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = stderr
         try process.run()
+        stdin.fileHandleForWriting.write(Data(script.utf8))
+        try stdin.fileHandleForWriting.close()
         process.waitUntilExit()
 
+        let stdoutText = String(
+            data: (try? stdout.fileHandleForReading.readToEnd()) ?? Data(),
+            encoding: .utf8
+        )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let stderrText = String(
             data: (try? stderr.fileHandleForReading.readToEnd()) ?? Data(),
             encoding: .utf8
         )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         #expect(process.terminationStatus == 0, "installer exited \(process.terminationStatus): \(stderrText)")
+        let result = try (JSONSerialization.jsonObject(with: Data(stdoutText.utf8)) as? [String: Any]) ?? [:]
+        #expect(result["success"] as? Bool == expectSuccess, "installer stdout: \(stdoutText)")
 
-        let hermesDir = tmp.appendingPathComponent(".hermes")
-        let configData = try Data(contentsOf: hermesDir.appendingPathComponent("config.yaml"))
+        let configData = (try? Data(contentsOf: hermesDir.appendingPathComponent("config.yaml"))) ?? Data()
         let configText = String(data: configData, encoding: .utf8) ?? ""
-        let parsed = try parseYAML(configText)
+        let parsed = (configText.isEmpty || !expectSuccess) ? [:] : try parseYAML(configText)
 
-        let authData = try Data(contentsOf: hermesDir.appendingPathComponent("auth.json"))
-        let auth = try (JSONSerialization.jsonObject(with: authData) as? [String: Any]) ?? [:]
+        let authData = (try? Data(contentsOf: hermesDir.appendingPathComponent("auth.json"))) ?? Data()
+        let auth = authData.isEmpty ? [:] : try (JSONSerialization.jsonObject(with: authData) as? [String: Any]) ?? [:]
 
         let envContent: String
         let envURL = hermesDir.appendingPathComponent(".env")
@@ -183,7 +364,7 @@ struct ProviderVMInstallerTests {
             envContent = ""
         }
 
-        return InstallerOutcome(config: parsed, authJSON: auth, envContent: envContent)
+        return InstallerOutcome(result: result, config: parsed, configText: configText, authJSON: auth, envContent: envContent)
     }
 
     /// Round-trips config.yaml into a dictionary without taking a Swift

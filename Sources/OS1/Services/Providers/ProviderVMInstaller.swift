@@ -36,8 +36,8 @@ enum ProviderVMInstallAction: Sendable {
 /// generate the YAML for `custom_providers` (Hermes' interactive
 /// `hermes model` wizard is the only path that writes those, and we
 /// can't drive it non-interactively over SSH). So we own the file
-/// updates ourselves; PyYAML is on every modern host or trivially
-/// installed via pip.
+/// updates ourselves. PyYAML is preferred when available, but locked-down
+/// hosts still get a small fallback parser for the config shape OS1 owns.
 final class ProviderVMInstaller: @unchecked Sendable {
     private let orgoTransport: OrgoTransport
     private let multiplexed: any RemoteTransport
@@ -179,6 +179,205 @@ extension ProviderVMInstaller {
             # JSON is valid YAML 1.2 and keeps the fallback dependency-free.
             return json.dumps(data, indent=2) + "\n"
 
+        def strip_inline_comment(text):
+            quote = None
+            escaped = False
+            for i, ch in enumerate(text):
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\" and quote == '"':
+                    escaped = True
+                    continue
+                if ch in ("'", '"'):
+                    if quote == ch:
+                        quote = None
+                    elif quote is None:
+                        quote = ch
+                    continue
+                if ch == "#" and quote is None and (i == 0 or text[i - 1].isspace()):
+                    return text[:i].rstrip()
+            return text.rstrip()
+
+        def split_top_level_csv(text):
+            parts = []
+            start = 0
+            depth = 0
+            quote = None
+            escaped = False
+            for i, ch in enumerate(text):
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\" and quote == '"':
+                    escaped = True
+                    continue
+                if ch in ("'", '"'):
+                    if quote == ch:
+                        quote = None
+                    elif quote is None:
+                        quote = ch
+                    continue
+                if quote is not None:
+                    continue
+                if ch in "[{":
+                    depth += 1
+                elif ch in "]}":
+                    depth -= 1
+                elif ch == "," and depth == 0:
+                    parts.append(text[start:i].strip())
+                    start = i + 1
+            parts.append(text[start:].strip())
+            return [part for part in parts if part]
+
+        def parse_scalar_fallback(value):
+            value = value.strip()
+            if value == "":
+                return ""
+            if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                try:
+                    return json.loads(value) if value.startswith('"') else value[1:-1].replace("''", "'")
+                except Exception:
+                    return value[1:-1]
+            lowered = value.lower()
+            if lowered in ("true", "false"):
+                return lowered == "true"
+            if lowered in ("null", "none", "~"):
+                return None
+            if value.startswith("[") and value.endswith("]"):
+                try:
+                    return json.loads(value)
+                except Exception:
+                    inner = value[1:-1].strip()
+                    return [] if not inner else [parse_scalar_fallback(part) for part in split_top_level_csv(inner)]
+            if value.startswith("{") and value.endswith("}"):
+                try:
+                    loaded = json.loads(value)
+                    return loaded
+                except Exception:
+                    pass
+            try:
+                if any(ch in value for ch in (".", "e", "E")):
+                    return float(value)
+                return int(value)
+            except ValueError:
+                return value
+
+        def split_key_value_fallback(text):
+            quote = None
+            escaped = False
+            for i, ch in enumerate(text):
+                if escaped:
+                    escaped = False
+                    continue
+                if ch == "\\" and quote == '"':
+                    escaped = True
+                    continue
+                if ch in ("'", '"'):
+                    if quote == ch:
+                        quote = None
+                    elif quote is None:
+                        quote = ch
+                    continue
+                if ch == ":" and quote is None:
+                    key = text[:i].strip()
+                    value = text[i + 1:].strip()
+                    if not key:
+                        raise ValueError(f"missing key before ':' in line: {text}")
+                    return key.strip('"').strip("'"), value
+            raise ValueError(f"expected 'key: value' in line: {text}")
+
+        def parse_config_fallback(text):
+            stripped = text.strip()
+            if not stripped:
+                return {}
+            try:
+                loaded = json.loads(text)
+                if not isinstance(loaded, dict):
+                    raise ValueError("top-level config must be a mapping")
+                return loaded
+            except json.JSONDecodeError:
+                pass
+
+            lines = []
+            for line_number, raw in enumerate(text.splitlines(), start=1):
+                if "\t" in raw:
+                    raise ValueError(f"tabs are not supported in config.yaml fallback parser at line {line_number}")
+                if not raw.strip() or raw.lstrip().startswith("#"):
+                    continue
+                indent = len(raw) - len(raw.lstrip(" "))
+                content = strip_inline_comment(raw[indent:])
+                if content:
+                    lines.append((line_number, indent, content))
+            if not lines:
+                return {}
+
+            def parse_block(index, indent):
+                _, current_indent, content = lines[index]
+                if current_indent != indent:
+                    raise ValueError(f"unexpected indentation at line {lines[index][0]}")
+                if content == "-" or content.startswith("- "):
+                    return parse_sequence(index, indent)
+                return parse_mapping(index, indent)
+
+            def parse_mapping(index, indent):
+                result = {}
+                while index < len(lines):
+                    line_number, current_indent, content = lines[index]
+                    if current_indent < indent:
+                        break
+                    if current_indent > indent:
+                        raise ValueError(f"unexpected indentation at line {line_number}")
+                    if content == "-" or content.startswith("- "):
+                        break
+                    key, value = split_key_value_fallback(content)
+                    index += 1
+                    if value:
+                        result[key] = parse_scalar_fallback(value)
+                    elif index < len(lines) and lines[index][1] > current_indent:
+                        result[key], index = parse_block(index, lines[index][1])
+                    else:
+                        result[key] = {}
+                return result, index
+
+            def parse_sequence(index, indent):
+                result = []
+                while index < len(lines):
+                    line_number, current_indent, content = lines[index]
+                    if current_indent < indent:
+                        break
+                    if current_indent > indent:
+                        raise ValueError(f"unexpected indentation at line {line_number}")
+                    if not (content == "-" or content.startswith("- ")):
+                        break
+                    item = content[1:].strip()
+                    index += 1
+                    if not item:
+                        if index < len(lines) and lines[index][1] > current_indent:
+                            value, index = parse_block(index, lines[index][1])
+                        else:
+                            value = None
+                    elif ":" in item:
+                        key, value_text = split_key_value_fallback(item)
+                        value = {}
+                        value[key] = parse_scalar_fallback(value_text) if value_text else {}
+                        while index < len(lines) and lines[index][1] > current_indent:
+                            nested, index = parse_block(index, lines[index][1])
+                            if not isinstance(nested, dict):
+                                raise ValueError(f"expected mapping fields for list item after line {line_number}")
+                            value.update(nested)
+                    else:
+                        value = parse_scalar_fallback(item)
+                    result.append(value)
+                return result, index
+
+            parsed, index = parse_block(0, lines[0][1])
+            if index != len(lines):
+                raise ValueError(f"could not parse config.yaml near line {lines[index][0]}")
+            if not isinstance(parsed, dict):
+                raise ValueError("top-level config must be a mapping")
+            return parsed
+
         def read_env_file():
             entries = []
             if not os.path.exists(env_path):
@@ -244,18 +443,28 @@ extension ProviderVMInstaller {
             if not os.path.exists(config_path):
                 return {}
             try:
-                import yaml as _yaml
                 with open(config_path, "r") as fh:
-                    loaded = _yaml.safe_load(fh) or {}
-                    return loaded if isinstance(loaded, dict) else {}
+                    config_text = fh.read()
             except Exception as exc:
-                try:
-                    with open(config_path, "r") as fh:
-                        loaded = json.load(fh) or {}
-                        return loaded if isinstance(loaded, dict) else {}
-                except Exception:
-                    errors.append(f"Couldn't read existing config.yaml: {exc}")
-                    return {}
+                errors.append(f"Couldn't read existing config.yaml: {exc}")
+                return None
+            try:
+                import yaml as _yaml
+                loaded = _yaml.safe_load(config_text) or {}
+                if not isinstance(loaded, dict):
+                    errors.append("Couldn't read existing config.yaml: top-level config must be a mapping")
+                    return None
+                return loaded
+            except ImportError:
+                pass
+            except Exception as exc:
+                errors.append(f"Couldn't parse existing config.yaml with PyYAML: {exc}")
+                return None
+            try:
+                return parse_config_fallback(config_text)
+            except Exception as exc:
+                errors.append(f"Couldn't parse existing config.yaml without PyYAML: {exc}")
+                return None
 
         def write_config(data):
             try:
@@ -403,6 +612,8 @@ extension ProviderVMInstaller {
             if env_has_key(entries, env_var):
                 steps.append("env_present")
             data = load_config()
+            if data is None:
+                emit({"success": False, "errors": errors, "steps_done": steps})
             if KIND == "custom":
                 providers = data.get("custom_providers") or []
                 for item in providers:
@@ -439,6 +650,8 @@ extension ProviderVMInstaller {
                 if not ensure_yaml():
                     emit({"success": False, "errors": errors, "steps_done": steps})
                 data = load_config()
+                if data is None:
+                    emit({"success": False, "errors": errors, "steps_done": steps})
                 data, provider_changed = upsert_custom_provider(data)
                 if provider_changed:
                     if not write_config(data):
@@ -451,6 +664,8 @@ extension ProviderVMInstaller {
                 if not ensure_yaml():
                     emit({"success": False, "errors": errors, "steps_done": steps})
                 data = load_config()
+                if data is None:
+                    emit({"success": False, "errors": errors, "steps_done": steps})
                 data = upsert_active_model(data, activate_model)
                 if not write_config(data):
                     emit({"success": False, "errors": errors, "steps_done": steps})
@@ -468,6 +683,8 @@ extension ProviderVMInstaller {
             if not ensure_yaml():
                 emit({"success": False, "errors": errors, "steps_done": steps})
             data = load_config()
+            if data is None:
+                emit({"success": False, "errors": errors, "steps_done": steps})
             data = upsert_active_model(data, activate_model)
             if not write_config(data):
                 emit({"success": False, "errors": errors, "steps_done": steps})
@@ -488,6 +705,8 @@ extension ProviderVMInstaller {
                 if not ensure_yaml():
                     emit({"success": False, "errors": errors, "steps_done": steps})
                 data = load_config()
+                if data is None:
+                    emit({"success": False, "errors": errors, "steps_done": steps})
                 data, removed_cp = remove_custom_provider(data)
                 if removed_cp:
                     if not write_config(data):
