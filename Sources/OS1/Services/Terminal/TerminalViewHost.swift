@@ -87,10 +87,14 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
         guard startedLaunchToken != launchToken else { return }
         startedLaunchToken = launchToken
 
-        let environment = [
-            "TERM=xterm-256color",
-            "COLORTERM=truecolor"
-        ]
+        guard !sshArguments.isEmpty else {
+            onProcessExit?(-1)
+            return
+        }
+
+        // Preserve the minimum terminal environment and auth socket so SSH can
+        // authenticate with agent-backed keys the same way as non-interactive checks.
+        let environment = terminalEnvironment()
 
         hostView.terminalView.startProcess(
             executable: "/usr/bin/ssh",
@@ -99,6 +103,33 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
             execName: "ssh"
         )
         onProcessStart?()
+    }
+
+    private func terminalEnvironment() -> [String] {
+        var environment = [String: String]()
+        let validEnvKey = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
+
+        for entry in Terminal.getEnvironmentVariables(termName: "xterm-256color") {
+            let parts = entry.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else {
+                continue
+            }
+            let key = String(parts[0])
+            let value = String(parts[1])
+
+            guard !key.isEmpty,
+                  key.unicodeScalars.allSatisfy(validEnvKey.contains) else {
+                continue
+            }
+
+            environment[key] = value
+        }
+
+        if let sshAuthSocket = ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] {
+            environment["SSH_AUTH_SOCK"] = sshAuthSocket
+        }
+
+        return environment.map { "\($0.key)=\($0.value)" }
     }
 
     private func applyAppearance(_ appearance: TerminalThemeAppearance) {
