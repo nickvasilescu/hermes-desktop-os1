@@ -101,13 +101,17 @@ final class TerminalViewHost: NSObject, TerminalDriver, LocalProcessTerminalView
     }
 
     private func terminalEnvironment() -> [String] {
-        var environment = Dictionary<String, String>(
-            uniqueKeysWithValues: Terminal.getEnvironmentVariables(termName: "xterm-256color").compactMap { entry in
-                let parts = entry.split(separator: "=", maxSplits: 1)
-                guard parts.count == 2 else { return nil }
-                return (String(parts[0]), String(parts[1]))
+        var environment = [String: String]()
+
+        for entry in Terminal.getEnvironmentVariables(termName: "xterm-256color") {
+            let parts = entry.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else {
+                continue
             }
-        )
+            let key = String(parts[0])
+            let value = String(parts[1])
+            environment[key] = value
+        }
 
         if let sshAuthSocket = ProcessInfo.processInfo.environment["SSH_AUTH_SOCK"] {
             environment["SSH_AUTH_SOCK"] = sshAuthSocket
