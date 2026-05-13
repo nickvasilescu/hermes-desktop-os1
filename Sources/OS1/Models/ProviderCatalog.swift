@@ -133,6 +133,20 @@ enum ProviderCatalog {
             // to baseURL.path).
             validation: .modelsEndpoint(path: "/models"),
             supportsOAuth: false
+        ),
+        ProviderCatalogEntry(
+            slug: "MiniMax",
+            displayName: "MiniMax",
+            tagline: "MiniMax-M2.7 — peak performance and ultimate value, 204K context.",
+            symbolName: "bolt",
+            keyPrefixHint: "eyJ…",
+            dashboardURL: URL(string: "https://platform.minimax.io/user-center/basic-information/interface-key")!,
+            docsURL: URL(string: "https://platform.minimax.io/docs/api-reference/text-openai-api"),
+            envVar: "MINIMAX_API_KEY",
+            baseURL: URL(string: "https://api.minimax.io/v1")!,
+            kind: .customProvider(configName: "MiniMax"),
+            validation: .modelsEndpoint(path: "/models"),
+            supportsOAuth: false
         )
     ]
 
